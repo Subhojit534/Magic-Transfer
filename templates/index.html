@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Magic Drop</title>
+    <!-- Load MediaPipe and SocketIO -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+
+    <style>
+        body { margin: 0; background-color: #000; overflow: hidden; font-family: sans-serif; }
+        #container { position: relative; width: 100vw; height: 100vh; }
+        
+        /* Camera Feed (flipped for mirror effect) */
+        #input_video { 
+            position: absolute; 
+            width: 100%; 
+            height: 100%; 
+            object-fit: cover; 
+            transform: scaleX(-1); 
+        }
+        
+        /* Overlay UI */
+        #ui-layer { 
+            position: absolute; top: 0; left: 0; 
+            width: 100%; height: 100%; 
+            pointer-events: none; 
+            display: flex; flex-direction: column; 
+            align-items: center; justify-content: center; 
+        }
+        
+        h1 { color: white; background: rgba(0,0,0,0.5); padding: 10px 20px; border-radius: 20px; margin-top: 50px; text-align: center; font-size: 1.5rem; }
+        #status { color: #00ff00; font-weight: bold; font-size: 1.2rem; background: rgba(0,0,0,0.7); padding: 5px 10px; border-radius: 5px;}
+        
+        /* The Received Image */
+        #result_image { 
+            display: none; 
+            position: absolute; 
+            top: 50%; left: 50%; 
+            transform: translate(-50%, -50%); 
+            max-width: 90%; max-height: 80%; 
+            border: 5px solid white; 
+            border-radius: 15px; 
+            box-shadow: 0 0 50px rgba(0,0,0,0.8);
+            z-index: 10;
+        }
+
+        #reset-btn {
+            display: none;
+            position: absolute; bottom: 80px; 
+            background: white; border: none; padding: 15px 30px; 
+            border-radius: 30px; font-weight: bold; font-size: 1.2rem;
+            pointer-events: auto; z-index: 11;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="container">
+        <video id="input_video" playsinline></video>
+        <img id="result_image" src="" alt="Dropped Image">
+        
+        <div id="ui-layer">
+            <h1>🖐 Show Open Palm</h1>
+            <p id="status">Connecting...</p>
+            <button id="reset-btn" onclick="resetApp()">Drop Again</button>
+        </div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('input_video');
+        const statusText = document.getElementById('status');
+        const resultImage = document.getElementById('result_image');
+        const resetBtn = document.getElementById('reset-btn');
+        const socket = io();
+
+        let lastActionTime = 0;
+        let isHoldingImage = false;
+
+        // --- SOCKET IO EVENTS ---
+        socket.on('connect', () => { statusText.innerText = "✅ Watching Hand..."; });
+        socket.on('disconnect', () => { statusText.innerText = "❌ Disconnected"; });
+
+        socket.on('receive_drop', (data) => {
+            console.log("Image Received!");
+            resultImage.src = `data:image/png;base64,${data.image_data}`;
+            resultImage.style.display = "block";
+            resetBtn.style.display = "block";
+            isHoldingImage = true;
+            statusText.innerText = "✨ Magic Transfer Complete!";
+        });
+
+        socket.on('server_response', (data) => {
+            if(data.message.includes("empty")) {
+                statusText.innerText = "📭 Nothing to drop! Grab on PC first.";
+                setTimeout(() => { statusText.innerText = "✅ Watching Hand..."; }, 3000);
+            }
+        });
+
+        function resetApp() {
+            resultImage.style.display = "none";
+            resetBtn.style.display = "none";
+            isHoldingImage = false;
+            statusText.innerText = "✅ Watching Hand...";
+        }
+
+        // --- HAND TRACKING LOGIC ---
+        function onResults(results) {
+            if (isHoldingImage) return; // Stop processing if showing image
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                
+                // Get Thumb Tip (4) and Index Tip (8)
+                const thumbTip = landmarks[4];
+                const indexTip = landmarks[8];
+
+                // Calculate Distance (Simple Euclidean)
+                // We assume video coordinate space is normalized [0.0, 1.0]
+                const dx = thumbTip.x - indexTip.x;
+                const dy = thumbTip.y - indexTip.y;
+                const distance = Math.sqrt(dx*dx + dy*dy);
+
+                // THRESHOLD: > 0.15 usually means fingers are spread/open
+                if (distance > 0.15) {
+                    const now = Date.now();
+                    if (now - lastActionTime > 2000) {
+                        console.log("Open Hand Detected! Distance: " + distance);
+                        statusText.innerText = "⚡ Dropping...";
+                        socket.emit('request_drop');
+                        lastActionTime = now;
+                    }
+                }
+            }
+        }
+
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        camera.start();
+    </script>
+</body>
+</html>

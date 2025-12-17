@@ -1,0 +1,8 @@
+opencv-python
+mediapipe
+python-socketio[client]
+flask
+eventlet
+Pillow
+pyautogui
+requests
